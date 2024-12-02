@@ -20,6 +20,23 @@ source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 
+RunPod Pytorch 2.4.0을 사용하는 경우 아래 명령어를 사용합니다.
+
+```bash
+apt update
+apt install -y htop uznip
+scp -P 25035 -i C:\Users\yjyou\.ssh\id_ed25519 dacon-vqa.zip root@213.173.110.201:/workspace/florence2-finetuning
+```
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install pillow packaging transformers accelerate datasets timm einops 'numpy<2' torch==2.4.0 ipywidgets
+pip install flash-attn --no-build-isolation
+```
+
+
 If you encounter issues with flash-attn, you can fix it with the following command:
 
 ```bash
