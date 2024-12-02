@@ -51,7 +51,6 @@ val_loader = DataLoader(
     val_dataset, batch_size=batch_size, collate_fn=collate_fn, num_workers=num_workers
 )
 
-
 def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6):
     optimizer = AdamW(model.parameters(), lr=lr)
     num_training_steps = epochs * len(train_loader)
@@ -99,16 +98,17 @@ def train_model(train_loader, val_loader, model, processor, epochs=10, lr=1e-6):
                 )
 
                 for generated_text, answer in zip(generated_texts, answers):
+                    # task_answer_post_processing_type == 'pure_text'
                     parsed_answer = processor.post_process_generation(
                         generated_text,
-                        task="<DocVQA>",
+                        task="<ImageVQA>",
                         image_size=(
                             inputs["pixel_values"].shape[-2],
                             inputs["pixel_values"].shape[-1],
                         ),
                     )
                     print("GT:", answer)
-                    print("Pred:", parsed_answer["<DocVQA>"])
+                    print("Pred:", parsed_answer["<ImageVQA>"])
 
             loss.backward()
             optimizer.step()
