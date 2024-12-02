@@ -1,5 +1,6 @@
 import concurrent.futures
 import io
+import os
 
 import pandas as pd
 from datasets import get_dataset_config_names, load_dataset, load_from_disk
@@ -163,3 +164,40 @@ class TheCauldronDataset(BaseDataset):
             image = image.convert("RGB")
 
         return question, answer, image
+
+
+class DaconVQADataset(BaseDataset):
+    def __init__(self, split):
+        super().__init__(split)
+        self.name = "DaconVQA"
+        
+        self.data = pd.read_csv(f"dacon-vqa/{split}.csv")
+        self.task_prompt = "<VQA>"
+        
+        self.image_dir = f"dacon_vqa/images/{split}"
+        
+        self.mode = split
+        
+    def __len__(self):
+        return len(self.data) 
+    
+
+    def __getitem__(self, idx):
+        example = self.data.iloc[idx]
+        
+        # 1. 첫 글자 대문자화 2. 질문이 아닌 문장(is_question=False)인데 마침표(.)로 끝나지 않으면 마침표를 추가 3. 질문 문장(is_question=True)인데 물음표(?)로 끝나지 않으면 물음표를 추가 
+        question = self.task_prompt + self.correct_casing_finqa(
+            example["question"], True
+        )
+        answer = example["answer"]
+        
+        # image_path = os.path.join(self.image_dir, example["image_id"] + self.image_ext)
+        image_path = f"dacon-vqa/image/{self.mode}/{example['image_id']}.jpg"
+        image = Image.open(image_path)
+        
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+
+        return question, answer, image
+    
+    
