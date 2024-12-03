@@ -199,5 +199,3 @@ class DaconVQADataset(BaseDataset):
             image = image.convert("RGB")
 
         return question, answer, image
-    
-    
