@@ -13,12 +13,14 @@ sample_submission = pd.read_csv('./dacon-vqa/sample_submission.csv')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load the model and processor
-model_dir = "./model_checkpoints/best_model"
-model = AutoModelForCausalLM.from_pretrained(model_dir).to(device)
-processor = AutoProcessor.from_pretrained(model_dir)
+# model_dir = "./model_checkpoints/best_model"
+model_dir = "YoungjaeDev/DaconVQA-Florence2-ft-base"
+
+model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True).to(device)
+processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
 
 def collate_fn(batch):
-    questions, images = zip(*batch)
+    questions, _, images = zip(*batch)
     inputs = processor(
         text=list(questions), images=list(images), return_tensors="pt", padding=True
     )
@@ -64,7 +66,7 @@ def inference_model(test_loader, model, processor):
                         inputs["pixel_values"].shape[-1],
                     ),
                 )
-                prediction = parsed_answer['<ImageVQA>'].replace('<pad>', '').strip().lower()
+                prediction = parsed_answer['<ImageVQA>'].replace('<pad>', '').strip()#.lower()
                 
                 print(prediction)
                 all_predictions.append(prediction)

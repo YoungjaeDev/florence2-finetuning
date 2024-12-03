@@ -2,16 +2,29 @@ import os
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoProcessor, AutoConfig
 from data import DaconVQADataset
+from huggingface_hub import login
+from dotenv import load_dotenv
 
+load_dotenv()
+
+# Hugging Face 로그인
+def init_hf_login():
+    token = os.getenv("HUGGINGFACE_HUB_TOKEN")  # 환경 변수에서 토큰을 가져오거나
+    if token is None:
+        raise ValueError("HUGGINGFACE_HUB_TOKEN is not set in the environment variables.")
+    login(token=token)
+    
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load the model and processor
 model_dir = "./model_checkpoints/best_model"
-model = AutoModelForCausalLM.from_pretrained(model_dir).to(device)
-processor = AutoProcessor.from_pretrained(model_dir)
+model_name = "microsoft/Florence-2-base-ft"
+model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True, config=model_config).to(device)
+processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
 
 def collate_fn(batch):
     questions, answers, images = zip(*batch)
@@ -34,13 +47,22 @@ train_dataset, val_dataset = torch.utils.data.random_split(dataset, [0.8, 0.2], 
 # Create validation dataset and DataLoader
 val_loader = DataLoader(
     val_dataset, 
-    batch_size=32, 
+    batch_size=16, 
     collate_fn=collate_fn, 
-    num_workers=8,
+    num_workers=4,
     pin_memory=True,
 )
 
 def validate_model(val_loader, model, processor):
+    # Push to Hub
+    try:
+        print("Pushing model and processor to Hugging Face Hub...")
+        model.push_to_hub("YoungjaeDev/DaconVQA-Florence2-ft-base")
+        processor.push_to_hub("YoungjaeDev/DaconVQA-Florence2-ft-base")
+        print("Successfully pushed to Hub!")
+    except Exception as e:
+        print(f"Error pushing to Hub: {str(e)}")
+        
     model.eval()
     total_correct = 0
     total_samples = 0
@@ -78,6 +100,10 @@ def validate_model(val_loader, model, processor):
 
     accuracy = total_correct / total_samples * 100
     print(f"Validation Accuracy: {accuracy:.2f}%")
-
+    
+    
+        
 if __name__ == "__main__":
+    
+    init_hf_login()
     validate_model(val_loader, model, processor)
