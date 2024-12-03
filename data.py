@@ -189,9 +189,9 @@ class DaconVQADataset(BaseDataset):
         question = self.task_prompt + self.correct_casing_finqa(
             example["question"], True
         )
-        answer = example["answer"]
         
-        # image_path = os.path.join(self.image_dir, example["image_id"] + self.image_ext)
+        answer = example["answer"] if self.mode != "test" else None
+        
         image_path = f"dacon-vqa/image/{self.mode}/{example['image_id']}.jpg"
         image = Image.open(image_path)
         
