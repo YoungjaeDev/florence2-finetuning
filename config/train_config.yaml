@@ -1,18 +1,18 @@
 # 기본 학습 설정
 training:
   batch_size: 32
-  epochs: 5
-  learning_rate: 1e-6
+  epochs: 10
+  learning_rate: 0.000001 # 1e-6
   log_steps: 200
   seed: 42
-  num_workers: 8
+  num_workers: 16
   resume: false
   resume_path: "./model_checkpoints/ddp_best_model"
 
 # 모델 설정
 model:
   name: "microsoft/Florence-2-base-ft"
-  use_lora: true
+  use_lora: false
   trust_remote_code: true
   dtype: "float16"
   train_vision_encoder: true

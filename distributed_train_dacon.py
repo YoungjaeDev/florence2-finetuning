@@ -1,6 +1,9 @@
 import argparse
 import os
+import warnings
+warnings.filterwarnings("ignore")
 from functools import partial
+from datetime import timedelta
 
 import friendlywords as fw
 import torch
@@ -13,16 +16,23 @@ from tqdm import tqdm
 from transformers import (AdamW, AutoConfig, AutoModelForCausalLM, AutoProcessor,
                           get_scheduler)
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import wandb
+
 from data import DaconVQADataset
 from peft import LoraConfig, get_peft_model
 from sklearn.metrics import accuracy_score
 from utils.config import Config
 
 def setup(rank, world_size):
+    print(f"Setting up process group for rank {rank} with world size {world_size} ... ")
+    port = int(os.environ.get("MASTER_PORT", "29500"))
     os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12355"
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    os.environ["MASTER_PORT"] = str(port)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=10))
     torch.cuda.set_device(rank)
 
 
@@ -30,12 +40,11 @@ def cleanup():
     dist.destroy_process_group()
 
 
-def collate_fn(batch, processor, device):
+def collate_fn(batch, processor):
     questions, answers, images = zip(*batch)
     inputs = processor(
         text=list(questions), images=list(images), return_tensors="pt", padding=True
     )
-    inputs["pixel_values"] = inputs["pixel_values"].to(device)
     return inputs, answers
 
 
@@ -51,24 +60,27 @@ def train_model(rank, world_size, config: Config, run_name=None):
         wandb.init(project="DaconVQA", name=run_name)
         wandb.config.update(config.__dict__)
 
+        print(f"Process {rank} started.")
+
+
     # 모델과 프로세서 로드
     model = AutoModelForCausalLM.from_pretrained(
         config.model.name if not config.training.resume else config.training.resume_path,
         trust_remote_code=config.model.trust_remote_code,
         torch_dtype=getattr(torch, config.model.dtype)
-    ).to(device)
-    processor = AutoProcessor.from_pretrained(
-        config.model.name, trust_remote_code=True
     )
-    processor.torch_dtype = str(processor.torch_dtype).split('.')[-1]
-
+    model = model.to(rank)
+    processor = AutoProcessor.from_pretrained(
+        config.model.name, trust_remote_code=config.model.trust_remote_code
+    )
+        
     if config.model.use_lora:
         TARGET_MODULES = [
             "q_proj", "o_proj", "k_proj", "v_proj",
             "linear", "Conv2d", "lm_head", "fc2"
         ]
 
-        config = LoraConfig(
+        lora_config = LoraConfig(
             r=config.lora.r,
             lora_alpha=config.lora.alpha,
             target_modules=TARGET_MODULES,
@@ -79,7 +91,7 @@ def train_model(rank, world_size, config: Config, run_name=None):
             use_rslora=True,
             init_lora_weights="gaussian",
         )
-        model = get_peft_model(model, config)
+        model = get_peft_model(model, lora_config)
 
     # 이미지 인코더 파라미터 고정
     if not config.model.train_vision_encoder:
@@ -94,25 +106,25 @@ def train_model(rank, world_size, config: Config, run_name=None):
     generator = torch.Generator().manual_seed(42)
     train_dataset, val_dataset = torch.utils.data.random_split(dataset, [0.8, 0.2], generator=generator)
 
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.training.batch_size,
-        collate_fn=partial(collate_fn, processor=processor, device=device),
+        collate_fn=partial(collate_fn, processor=processor),
         num_workers=config.training.num_workers,
         sampler=train_sampler,
-        # pin_memory=True
+        pin_memory=True
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.training.batch_size,
-        collate_fn=partial(collate_fn, processor=processor, device=device),
+        collate_fn=partial(collate_fn, processor=processor),
         num_workers=config.training.num_workers,
         sampler=val_sampler,
-        # pin_memory=True
+        pin_memory=True
     )
 
     optimizer = AdamW(model.parameters(), lr=config.training.learning_rate)
@@ -144,8 +156,8 @@ def train_model(rank, world_size, config: Config, run_name=None):
             ).input_ids.to(device)
 
             outputs = model(
-                input_ids=inputs["input_ids"],
-                pixel_values=inputs["pixel_values"],
+                inputs["input_ids"].to(device),  # input_ids는 LongTensor 유지
+                inputs["pixel_values"].to(device, dtype=getattr(torch, config.model.dtype)),  # pixel_values는 config.model.dtype 사용
                 labels=labels
             )
             loss = outputs.loss
@@ -177,7 +189,7 @@ def train_model(rank, world_size, config: Config, run_name=None):
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch + 1}/{config.training.epochs}", position=rank):
                 inputs, answers = batch
-                
+            
                 labels = processor.tokenizer(
                     text=answers,
                     return_tensors="pt",
@@ -186,8 +198,8 @@ def train_model(rank, world_size, config: Config, run_name=None):
                 ).input_ids.to(device)
 
                 outputs = model(
-                    input_ids=inputs["input_ids"],
-                    pixel_values=inputs["pixel_values"],
+                    inputs["input_ids"].to(device),  # input_ids는 LongTensor 유지
+                    inputs["pixel_values"].to(device, dtype=getattr(torch, config.model.dtype)),  # pixel_values는 config.model.dtype 사용
                     labels=labels
                 )
                 loss = outputs.loss
@@ -196,8 +208,8 @@ def train_model(rank, world_size, config: Config, run_name=None):
                 # Generate predictions
                 if rank == 0:
                     generated_ids = model.generate(
-                        input_ids=inputs["input_ids"],
-                        pixel_values=inputs["pixel_values"],
+                        inputs["input_ids"].to(device),  # input_ids는 LongTensor 유지
+                        inputs["pixel_values"].to(device, dtype=getattr(torch, config.model.dtype)),  # pixel_values는 config.model.dtype 사용
                         max_new_tokens=1024,
                         num_beams=3,
                     )
@@ -253,7 +265,11 @@ def main():
     # Load config
     config = Config.from_yaml(args.config)
     
+    # wandb 초기화는 메인 프로세스에서만 한 번 수행
+    wandb.login(key=os.getenv("WANDB_API_KEY"))
+    
     world_size = torch.cuda.device_count()
+    print(f"World size: {world_size}")
     mp.spawn(
         train_model,
         args=(world_size, config, args.run_name),
