@@ -17,9 +17,7 @@ import wandb
 from data import DaconVQADataset
 from peft import LoraConfig, get_peft_model
 from sklearn.metrics import accuracy_score
-
-RESUME = False
-model_checkpoint_dir = "./model_checkpoints/ddp_best_model"
+from utils.config import Config
 
 def setup(rank, world_size):
     os.environ["MASTER_ADDR"] = "localhost"
@@ -41,7 +39,7 @@ def collate_fn(batch, processor, device):
     return inputs, answers
 
 
-def train_model(rank, world_size, batch_size=32, use_lora=False, epochs=5, lr=1e-6, eval_steps=200, run_name=None):
+def train_model(rank, world_size, config: Config, run_name=None):
     setup(rank, world_size)
     device = torch.device(f"cuda:{rank}")
     
@@ -51,36 +49,31 @@ def train_model(rank, world_size, batch_size=32, use_lora=False, epochs=5, lr=1e
     # wandb 초기화 (rank 0만)
     if rank == 0:
         wandb.init(project="DaconVQA", name=run_name)
-        wandb.config.update({
-            "batch_size": batch_size,
-            "use_lora": use_lora,
-            "epochs": epochs,
-            "learning_rate": lr,
-            "eval_steps": eval_steps,
-            "world_size": world_size,
-        })
+        wandb.config.update(config.__dict__)
 
     # 모델과 프로세서 로드
-    model_config = AutoConfig.from_pretrained("microsoft/Florence-2-base-ft", trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        "microsoft/Florence-2-base-ft" if not RESUME else model_checkpoint_dir, trust_remote_code=True, config=model_config
+        config.model.name if not config.training.resume else config.training.resume_path,
+        trust_remote_code=config.model.trust_remote_code,
+        torch_dtype=getattr(torch, config.model.dtype)
     ).to(device)
     processor = AutoProcessor.from_pretrained(
-        "microsoft/Florence-2-base-ft", trust_remote_code=True
+        config.model.name, trust_remote_code=True
     )
+    processor.torch_dtype = str(processor.torch_dtype).split('.')[-1]
 
-    if use_lora:
+    if config.model.use_lora:
         TARGET_MODULES = [
             "q_proj", "o_proj", "k_proj", "v_proj",
             "linear", "Conv2d", "lm_head", "fc2"
         ]
 
         config = LoraConfig(
-            r=8,
-            lora_alpha=8,
+            r=config.lora.r,
+            lora_alpha=config.lora.alpha,
             target_modules=TARGET_MODULES,
             task_type="CAUSAL_LM",
-            lora_dropout=0.05,
+            lora_dropout=config.lora.dropout,
             bias="none",
             inference_mode=False,
             use_rslora=True,
@@ -89,8 +82,8 @@ def train_model(rank, world_size, batch_size=32, use_lora=False, epochs=5, lr=1e
         model = get_peft_model(model, config)
 
     # 이미지 인코더 파라미터 고정
-    for param in model.vision_tower.parameters():
-        param.requires_grad = False
+    # for param in model.vision_tower.parameters():
+    #     param.requires_grad = False
 
     # DDP 모델 설정
     model = DDP(model, device_ids=[rank])
@@ -105,24 +98,24 @@ def train_model(rank, world_size, batch_size=32, use_lora=False, epochs=5, lr=1e
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
+        batch_size=config.training.batch_size,
         collate_fn=partial(collate_fn, processor=processor, device=device),
-        num_workers=8,
+        num_workers=config.training.num_workers,
         sampler=train_sampler,
         # pin_memory=True
     )
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
+        batch_size=config.training.batch_size,
         collate_fn=partial(collate_fn, processor=processor, device=device),
-        num_workers=8,
+        num_workers=config.training.num_workers,
         sampler=val_sampler,
         # pin_memory=True
     )
 
-    optimizer = AdamW(model.parameters(), lr=lr)
-    num_training_steps = epochs * len(train_loader)
+    optimizer = AdamW(model.parameters(), lr=config.training.learning_rate)
+    num_training_steps = config.training.epochs * len(train_loader)
     lr_scheduler = get_scheduler(
         name="linear",
         optimizer=optimizer,
@@ -133,12 +126,12 @@ def train_model(rank, world_size, batch_size=32, use_lora=False, epochs=5, lr=1e
 
     # 학습 루프
     best_val_loss = float('inf')
-    for epoch in range(epochs):
+    for epoch in range(config.training.epochs):
         train_sampler.set_epoch(epoch)
         model.train()
         train_loss = 0
         
-        progress_bar = tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{epochs}", position=rank)
+        progress_bar = tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{config.training.epochs}", position=rank)
         for i, batch in enumerate(progress_bar):
             inputs, answers = batch
             
@@ -165,7 +158,7 @@ def train_model(rank, world_size, batch_size=32, use_lora=False, epochs=5, lr=1e
             progress_bar.set_postfix({'loss': loss.item()})
             global_step += 1
 
-            if global_step % eval_steps == 0:
+            if global_step % config.training.log_steps == 0:
                 # Log training metrics
                 if rank == 0:
                     avg_train_loss = train_loss / global_step
@@ -181,7 +174,7 @@ def train_model(rank, world_size, batch_size=32, use_lora=False, epochs=5, lr=1e
         all_ground_truths = []
         
         with torch.no_grad():
-            for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch + 1}/{epochs}", position=rank):
+            for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch + 1}/{config.training.epochs}", position=rank):
                 inputs, answers = batch
                 
                 labels = processor.tokenizer(
@@ -238,7 +231,6 @@ def train_model(rank, world_size, batch_size=32, use_lora=False, epochs=5, lr=1e
             print(f"Epoch {epoch + 1} Average Validation Loss: {avg_val_loss:.4f}")
             print(f"Epoch {epoch + 1} Validation Accuracy: {accuracy:.4f}")
 
-            # 모델 저장
         # 모델 저장 (rank 0만)
         if rank == 0:
             avg_val_loss = val_loss / len(val_loader)
@@ -253,17 +245,17 @@ def train_model(rank, world_size, batch_size=32, use_lora=False, epochs=5, lr=1e
 
 def main():
     parser = argparse.ArgumentParser(description="Train Florence-2 model on DaconVQA dataset")
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--lr", type=float, default=1e-6)
-    parser.add_argument("--eval-steps", type=int, default=200)
+    parser.add_argument("--config", type=str, default="config/train_config.yaml", help="Path to config file")
     parser.add_argument("--run-name", type=str, default=None)
     args = parser.parse_args()
 
+    # Load config
+    config = Config.from_yaml(args.config)
+    
     world_size = torch.cuda.device_count()
     mp.spawn(
         train_model,
-        args=(world_size, args.batch_size, args.epochs, args.lr, args.eval_steps, args.run_name),
+        args=(world_size, config, args.run_name),
         nprocs=world_size,
         join=True
     )
