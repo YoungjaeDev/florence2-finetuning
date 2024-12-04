@@ -26,7 +26,7 @@ class ModelConfig:
     use_lora: bool
     trust_remote_code: bool
     dtype: str
-
+    train_vision_encoder: bool
 @dataclass
 class Config:
     training: TrainingConfig

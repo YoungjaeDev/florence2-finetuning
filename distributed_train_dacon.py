@@ -82,8 +82,9 @@ def train_model(rank, world_size, config: Config, run_name=None):
         model = get_peft_model(model, config)
 
     # 이미지 인코더 파라미터 고정
-    # for param in model.vision_tower.parameters():
-    #     param.requires_grad = False
+    if not config.model.train_vision_encoder:
+        for param in model.vision_tower.parameters():
+            param.requires_grad = False
 
     # DDP 모델 설정
     model = DDP(model, device_ids=[rank])

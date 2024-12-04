@@ -11,10 +11,11 @@ training:
 
 # 모델 설정
 model:
-  name: "microsoft/Florence-2-base"
+  name: "microsoft/Florence-2-base-ft"
   use_lora: true
   trust_remote_code: true
   dtype: "float16"
+  train_vision_encoder: true
 
 # LoRA 설정
 lora:
