@@ -19,6 +19,7 @@ class TrainingConfig:
     num_workers: int
     resume: bool
     resume_path: str
+    prefetch_factor: int
 
 @dataclass
 class ModelConfig:

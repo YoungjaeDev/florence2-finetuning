@@ -15,6 +15,7 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from transformers import (AdamW, AutoConfig, AutoModelForCausalLM, AutoProcessor,
                           get_scheduler)
+import matplotlib.pyplot as plt
 
 from dotenv import load_dotenv
 
@@ -29,7 +30,7 @@ from utils.config import Config
 
 def setup(rank, world_size):
     print(f"Setting up process group for rank {rank} with world size {world_size} ... ")
-    port = int(os.environ.get("MASTER_PORT", "29500"))
+    port = int(os.environ.get("MASTER_PORT", "29501"))
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
     dist.init_process_group("nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=10))
@@ -57,8 +58,13 @@ def train_model(rank, world_size, config: Config, run_name=None):
 
     # wandb 초기화 (rank 0만)
     if rank == 0:
-        wandb.init(project="DaconVQA", name=run_name)
-        wandb.config.update(config.__dict__)
+        # wandb.init(project="DaconVQA", 
+        #            name=run_name, 
+        #            settings=wandb.Settings(init_timeout=450),
+        #            reinit=True,  # Allow reinit if needed
+        #            resume="allow"  # Allow resuming if a run crashes   
+        #         )
+        # wandb.config.update(config.__dict__)
 
         print(f"Process {rank} started.")
 
@@ -115,7 +121,8 @@ def train_model(rank, world_size, config: Config, run_name=None):
         collate_fn=partial(collate_fn, processor=processor),
         num_workers=config.training.num_workers,
         sampler=train_sampler,
-        pin_memory=True
+        pin_memory=True,
+        prefetch_factor=config.training.prefetch_factor
     )
 
     val_loader = DataLoader(
@@ -124,7 +131,8 @@ def train_model(rank, world_size, config: Config, run_name=None):
         collate_fn=partial(collate_fn, processor=processor),
         num_workers=config.training.num_workers,
         sampler=val_sampler,
-        pin_memory=True
+        pin_memory=True,
+        prefetch_factor=config.training.prefetch_factor
     )
 
     optimizer = AdamW(model.parameters(), lr=config.training.learning_rate)
@@ -139,12 +147,15 @@ def train_model(rank, world_size, config: Config, run_name=None):
 
     # 학습 루프
     best_val_loss = float('inf')
+    best_epoch = 0
+    history = {'train_loss': [], 'val_loss': []}
+    
     for epoch in range(config.training.epochs):
         train_sampler.set_epoch(epoch)
         model.train()
         train_loss = 0
         
-        progress_bar = tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{config.training.epochs}", position=rank)
+        progress_bar = tqdm(train_loader, desc=f"[RANK {rank}] Training Epoch {epoch + 1}/{config.training.epochs}", position=rank)
         for i, batch in enumerate(progress_bar):
             inputs, answers = batch
             
@@ -175,19 +186,26 @@ def train_model(rank, world_size, config: Config, run_name=None):
                 # Log training metrics
                 if rank == 0:
                     avg_train_loss = train_loss / global_step
-                    wandb.log({
-                        "train_loss": avg_train_loss,
-                        "step": global_step
-                    })
+                    # wandb.log({
+                    #     "train_loss": avg_train_loss,
+                    #     "step": global_step
+                    # })
+
+
+        # 각 에폭 끝에서 평균 train_loss 계산
+        avg_train_loss = train_loss / len(train_loader)
+        print(f"Rank {rank}: Epoch {epoch + 1} Average Training Loss: {avg_train_loss:.4f}")
+        history['train_loss'].append(avg_train_loss)
 
         # 검증 단계
         model.eval()
         val_loss = 0
+        val_steps = 0
         all_predictions = []
         all_ground_truths = []
         
         with torch.no_grad():
-            for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch + 1}/{config.training.epochs}", position=rank):
+            for batch in tqdm(val_loader, desc=f"[RANK {rank}] Validation Epoch {epoch + 1}/{config.training.epochs}", position=rank):
                 inputs, answers = batch
             
                 labels = processor.tokenizer(
@@ -195,6 +213,8 @@ def train_model(rank, world_size, config: Config, run_name=None):
                     return_tensors="pt",
                     padding=True,
                     return_token_type_ids=False,
+                    # truncation=True,
+                    # max_length=800
                 ).input_ids.to(device)
 
                 outputs = model(
@@ -204,56 +224,83 @@ def train_model(rank, world_size, config: Config, run_name=None):
                 )
                 loss = outputs.loss
                 val_loss += loss.item()
+                val_steps += 1
 
                 # Generate predictions
-                if rank == 0:
-                    generated_ids = model.generate(
-                        inputs["input_ids"].to(device),  # input_ids는 LongTensor 유지
-                        inputs["pixel_values"].to(device, dtype=getattr(torch, config.model.dtype)),  # pixel_values는 config.model.dtype 사용
-                        max_new_tokens=1024,
-                        num_beams=3,
-                    )
-                    generated_texts = processor.batch_decode(
-                        generated_ids, skip_special_tokens=False
-                    )
+                # if rank == 0:
+                #     # print(f"input_ids shape: {inputs['input_ids'].shape}")
+                #     # print(f"pixel_values shape: {inputs['pixel_values'].shape}")
                     
-                    for generated_text, answer in zip(generated_texts, answers):
-                        parsed_answer = processor.post_process_generation(
-                            generated_text,
-                            task="<ImageVQA>",
-                            image_size=(
-                                inputs["pixel_values"].shape[-2],
-                                inputs["pixel_values"].shape[-1],
-                            ),
-                        )
-                        prediction = parsed_answer['<ImageVQA>'].replace('<pad>', '').strip().lower()
-                        ground_truth = answer.lower().strip()
+                #     generated_ids = model.module.generate(
+                #         inputs["input_ids"].to(device),  # input_ids는 LongTensor 유지
+                #         inputs["pixel_values"].to(device, dtype=getattr(torch, config.model.dtype)),  # pixel_values는 config.model.dtype 사용
+                #         max_new_tokens=1024,
+                #         num_beams=3,
+                #     )
+                #     generated_texts = processor.batch_decode(
+                #         generated_ids, skip_special_tokens=False
+                #     )
+                    
+                #     for generated_text, answer in zip(generated_texts, answers):
+                #         parsed_answer = processor.post_process_generation(
+                #             generated_text,
+                #             task="<ImageVQA>",
+                #             image_size=(
+                #                 inputs["pixel_values"].shape[-2],
+                #                 inputs["pixel_values"].shape[-1],
+                #             ),
+                #         )
+                #         prediction = parsed_answer['<ImageVQA>'].replace('<pad>', '').strip().lower()
+                #         ground_truth = answer.lower().strip()
                         
-                        all_predictions.append(prediction)
-                        all_ground_truths.append(ground_truth)
-
-        # 전체 검증 손실 계산 및 기록 (rank 0만)
-        avg_val_loss = val_loss / len(val_loader)
+                #         all_predictions.append(prediction)
+                #         all_ground_truths.append(ground_truth)
+        
+        # 모든 프로세스의 val_loss 동기화
+        val_loss = torch.tensor(val_loss, device=device)
+        val_steps = torch.tensor(val_steps, device=device)
+        
+        dist.all_reduce(val_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_steps, op=dist.ReduceOp.SUM)
+        
+        # 전체 검증 손실 계산 (모든 프로세스에서 동일한 값을 가짐)
+        avg_val_loss = (val_loss / val_steps).item()
+        history['val_loss'].append(avg_val_loss)
+        
         if rank == 0:
-            accuracy = accuracy_score(all_ground_truths, all_predictions)
-            wandb.log({
-                "val_loss": avg_val_loss,
-                "val_accuracy": accuracy,
-                "epoch": epoch + 1
-            })
-            print(f"Epoch {epoch + 1} Average Validation Loss: {avg_val_loss:.4f}")
-            print(f"Epoch {epoch + 1} Validation Accuracy: {accuracy:.4f}")
+            # accuracy = accuracy_score(all_ground_truths, all_predictions)
+            # wandb.log({
+            #     "val_loss": avg_val_loss,
+            #     "val_accuracy": accuracy, # only rank 0
+            #     "epoch": epoch + 1
+            # })
+            print(f"All processes: Epoch {epoch + 1} Average Validation Loss: {avg_val_loss:.4f}")
+            # print(f"Rank {rank}: Epoch {epoch + 1} Validation Accuracy: {accuracy:.4f}")
 
         # 모델 저장 (rank 0만)
         if rank == 0:
             avg_val_loss = val_loss / len(val_loader)
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
+                best_epoch = epoch + 1
                 best_model_dir = f"./model_checkpoints/{run_name}/best_model"
                 os.makedirs(best_model_dir, exist_ok=True)
                 model.module.save_pretrained(best_model_dir)
                 processor.save_pretrained(best_model_dir)
 
+    # 학습 종료 후 그래프 생성 (rank 0만)
+    if rank == 0:
+        plt.figure(figsize=(10, 6))
+        plt.plot(history['train_loss'], label='Training Loss')
+        plt.plot(history['val_loss'], label='Validation Loss')
+        plt.axvline(x=best_epoch-1, color='r', linestyle='--', label='Best Model')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Training History')
+        plt.legend()
+        plt.savefig(f'./model_checkpoints/{run_name}/training_history.png')
+        plt.close()
+    
     cleanup()
 
 def main():
@@ -266,7 +313,7 @@ def main():
     config = Config.from_yaml(args.config)
     
     # wandb 초기화는 메인 프로세스에서만 한 번 수행
-    wandb.login(key=os.getenv("WANDB_API_KEY"))
+    # wandb.login(key=os.getenv("WANDB_API_KEY"))
     
     world_size = torch.cuda.device_count()
     print(f"World size: {world_size}")

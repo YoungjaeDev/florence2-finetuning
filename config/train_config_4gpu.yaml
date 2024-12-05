@@ -1,0 +1,45 @@
+# 기본 학습 설정
+training:
+  batch_size: 64
+  epochs: 10
+  learning_rate: 0.000001 # 1e-6
+  log_steps: 200
+  seed: 42
+  num_workers: 16
+  prefetch_factor: 2 # 미리 준비하는 배치 수
+  resume: false
+  resume_path: "./model_checkpoints/ddp_best_model"
+
+# 모델 설정
+model:
+  name: "microsoft/Florence-2-base-ft"
+  use_lora: false
+  trust_remote_code: true
+  dtype: "float16"
+  train_vision_encoder: true
+
+# LoRA 설정
+lora:
+  r: 8
+  alpha: 8
+  dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "o_proj"
+    - "k_proj"
+    - "v_proj"
+    - "linear"
+    - "Conv2d"
+    - "lm_head"
+    - "fc2"
+
+# 분산 학습 설정
+distributed:
+  master_addr: "localhost"
+  master_port: "12355"
+  backend: "nccl"
+
+# 경로 설정
+paths:
+  checkpoint_dir: "./model_checkpoints"
+  data_dir: "dacon-vqa" 
