@@ -136,14 +136,13 @@ def train_model(rank, world_size, config: Config, run_name=None):
     )
 
     optimizer = AdamW(model.parameters(), lr=config.training.learning_rate)
-    num_training_steps = config.training.epochs * len(train_loader)
+    num_training_steps = config.training.epochs * len(train_loader) * world_size
     lr_scheduler = get_scheduler(
         name="linear",
         optimizer=optimizer,
         num_warmup_steps=0,
         num_training_steps=num_training_steps,
     )
-    global_step = 0
 
     # 학습 루프
     best_val_loss = float('inf')
@@ -180,38 +179,33 @@ def train_model(rank, world_size, config: Config, run_name=None):
             loss = outputs.loss
 
             loss.backward()
+            
+              # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
 
             train_loss += loss.item()
             progress_bar.set_postfix({'loss': loss.item()})
-            global_step += 1
+                
 
-            if global_step % config.training.log_steps == 0:
-                # Log training metrics
-                if rank == 0:
-                    avg_train_loss = train_loss / global_step
-                    # wandb.log({
-                    #     "train_loss": avg_train_loss,
-                    #     "step": global_step
-                    # })
-
-
-        # 각 에폭 끝에서 평균 train_loss 계산
-        # avg_train_loss = train_loss / len(train_loader)
-
+        rank_avg_train_loss = train_loss / len(train_loader)
+        print(f"Rank {rank}: Epoch {epoch + 1} Average Training Loss: {rank_avg_train_loss:.4f}")
+        
         train_loss = torch.tensor(train_loss, device=device)
         dist.all_reduce(train_loss, op=dist.ReduceOp.SUM)
         avg_train_loss = train_loss / (len(train_loader) * world_size)
 
-        print(f"Rank {rank}: Epoch {epoch + 1} Average Training Loss: {avg_train_loss:.4f}")
+        if rank == 0:
+            print(f"All processes: Epoch {epoch + 1} Average Training Loss: {avg_train_loss:.4f}")
+            
         history['train_loss'].append(avg_train_loss)
 
         # 검증 단계
         model.eval()
         val_loss = 0
-        # val_steps = 0
         all_predictions = []
         all_ground_truths = []
         
@@ -235,7 +229,6 @@ def train_model(rank, world_size, config: Config, run_name=None):
                 )
                 loss = outputs.loss
                 val_loss += loss.item()
-                # val_steps += 1
 
                 # Generate predictions
                 # if rank == 0:
@@ -267,27 +260,18 @@ def train_model(rank, world_size, config: Config, run_name=None):
                 #         all_predictions.append(prediction)
                 #         all_ground_truths.append(ground_truth)
         
+        rank_avg_val_loss = val_loss / len(val_loader)
+        print(f"Rank {rank}: Epoch {epoch + 1} Average Validation Loss: {rank_avg_val_loss:.4f}")
+        
         # 모든 프로세스의 val_loss 동기화
         val_loss = torch.tensor(val_loss, device=device)
-        # val_steps = torch.tensor(val_steps, device=device)
-        
         dist.all_reduce(val_loss, op=dist.ReduceOp.SUM)
-        # dist.all_reduce(val_steps, op=dist.ReduceOp.SUM)
-        
-        # 전체 검증 손실 계산 (모든 프로세스에서 동일한 값을 가짐)
-        # avg_val_loss = (val_loss / val_steps).item()
+
         avg_val_loss = val_loss / (len(val_loader) * world_size) 
         history['val_loss'].append(avg_val_loss)
         
         if rank == 0:
-            # accuracy = accuracy_score(all_ground_truths, all_predictions)
-            # wandb.log({
-            #     "val_loss": avg_val_loss,
-            #     "val_accuracy": accuracy, # only rank 0
-            #     "epoch": epoch + 1
-            # })
             print(f"All processes: Epoch {epoch + 1} Average Validation Loss: {avg_val_loss:.4f}")
-            # print(f"Rank {rank}: Epoch {epoch + 1} Validation Accuracy: {accuracy:.4f}")
             
             csv_path = f"./model_checkpoints/{run_name}/training_history.csv"
             with open(csv_path, 'a') as f:
@@ -295,8 +279,6 @@ def train_model(rank, world_size, config: Config, run_name=None):
 
         # 모델 저장 (rank 0만)
         if rank == 0:
-            # avg_val_loss = val_loss / len(val_loader)
-            avg_val_loss = val_loss / (len(val_loader) * world_size)
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 best_epoch = epoch + 1
