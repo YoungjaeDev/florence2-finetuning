@@ -20,10 +20,14 @@ def init_hf_login():
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load the model and processor
-model_dir = "./model_checkpoints/best_model"
-model_name = "microsoft/Florence-2-base-ft"
-model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True, config=model_config).to(device)
+# model_dir = "./model_checkpoints/florence2-base-ft-fullft/best_model" # Validation Accuracy: 55.18%
+model_dir = "./model_checkpoints/florence2-ft-large-ft/best_model" # Validation Accuracy: 63.73%
+# model_name = "microsoft/Florence-2-base-ft"
+# model_dir = "YoungjaeDev/DaconVQA-Florence2-ft-base" # Validation Accuracy: 63.73%
+
+# model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+# model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True, config=model_config).to(device)
+model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True, torch_dtype=torch.float16).to(device)
 processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
 
 def collate_fn(batch):
@@ -51,18 +55,20 @@ val_loader = DataLoader(
     collate_fn=collate_fn, 
     num_workers=4,
     pin_memory=True,
+    prefetch_factor=2
 )
 
 def validate_model(val_loader, model, processor):
     # Push to Hub
     try:
         print("Pushing model and processor to Hugging Face Hub...")
-        model.push_to_hub("YoungjaeDev/DaconVQA-Florence2-ft-base")
-        processor.push_to_hub("YoungjaeDev/DaconVQA-Florence2-ft-base")
+        model.push_to_hub("YoungjaeDev/DaconVQA-Florence2-ft-large-ft-fp16")
+        processor.push_to_hub("YoungjaeDev/DaconVQA-Florence2-ft-large-ft-fp16")
         print("Successfully pushed to Hub!")
     except Exception as e:
         print(f"Error pushing to Hub: {str(e)}")
-        
+
+    return 
     model.eval()
     total_correct = 0
     total_samples = 0
@@ -74,7 +80,7 @@ def validate_model(val_loader, model, processor):
             
             generated_ids = model.generate(
                 input_ids=inputs["input_ids"],
-                pixel_values=inputs["pixel_values"],
+                pixel_values=inputs["pixel_values"].to(torch.float16),
                 max_new_tokens=1024,
                 num_beams=3,
             )
@@ -100,7 +106,6 @@ def validate_model(val_loader, model, processor):
 
     accuracy = total_correct / total_samples * 100
     print(f"Validation Accuracy: {accuracy:.2f}%")
-    
     
         
 if __name__ == "__main__":

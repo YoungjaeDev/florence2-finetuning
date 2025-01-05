@@ -14,9 +14,11 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load the model and processor
 # model_dir = "./model_checkpoints/best_model"
-model_dir = "YoungjaeDev/DaconVQA-Florence2-ft-base"
+# model_dir = "YoungjaeDev/DaconVQA-Florence2-ft-base"
+model_dir = "./model_checkpoints/florence2-ft-large-ft/best_model"
+torch_dtype = torch.float16
 
-model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True).to(device)
+model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True, torch_dtype=torch_dtype).to(device)
 processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
 
 def collate_fn(batch):
@@ -34,8 +36,9 @@ test_loader = DataLoader(
     test_dataset, 
     batch_size=32, 
     collate_fn=collate_fn, 
-    num_workers=8,
+    num_workers=4,
     pin_memory=True,
+    prefetch_factor=2
 )
 
 def inference_model(test_loader, model, processor):
@@ -49,7 +52,7 @@ def inference_model(test_loader, model, processor):
             
             generated_ids = model.generate(
                 input_ids=inputs["input_ids"],
-                pixel_values=inputs["pixel_values"],
+                pixel_values=inputs["pixel_values"].to(torch_dtype),
                 max_new_tokens=1024,
                 num_beams=3,
             )
@@ -72,7 +75,7 @@ def inference_model(test_loader, model, processor):
                 all_predictions.append(prediction)
                 
         sample_submission['answer'] = all_predictions
-        sample_submission.to_csv('submission.csv', index=False)
+        sample_submission.to_csv('submission_florence2-ft-large-ft.csv', index=False)
 
 if __name__ == "__main__":
     inference_model(test_loader, model, processor)

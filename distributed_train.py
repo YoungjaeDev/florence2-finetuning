@@ -1,5 +1,7 @@
 import argparse
 import os
+import warnings
+warnings.filterwarnings("ignore")
 from functools import partial
 
 import friendlywords as fw
